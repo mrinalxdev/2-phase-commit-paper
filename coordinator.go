@@ -152,12 +152,15 @@ func (c *Coordinator) makeDecision(txID, decision string) {
 		for _, p := range c.participants {
 			c.outbox <- Message{Type: DecisionMsg, TxID: txID, Sender: c.ID, Receiver: p, Payload: "commit"}
 		}
-	} else { // abort
-		for _, p := range c.participants {
-			if entry.Votes[p] { // voted YES → must receive abort
-				c.outbox <- Message{Type: DecisionMsg, TxID: txID, Sender: c.ID, Receiver: p, Payload: "abort"}
-				Log(c.ID, fmt.Sprintf("Sent abort to %s (was prepared)", p))
+	} else {
+		for _, p := range c.participants{
+			if vote, ok := entry.Votes[p]; ok && vote {
+				c.outbox <- Message{Type: DecisionMsg, TxID: txID, Sender : c.ID, Receiver: p, Payload: "abort"}
+				Log(c.ID, fmt.Sprintf("Send abort to %s (was prepared)", p))
 			} else {
+				//participants voted no or hasn't responsed yet
+				//though in the abort immediately case, they voted No
+				// 
 				entry.Acks[p] = true
 				Log(c.ID, fmt.Sprintf("Implicit ACK from %s (voted NO)", p))
 			}
