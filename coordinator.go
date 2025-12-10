@@ -129,7 +129,6 @@ func (c *Coordinator) makeDecision(txID, decision string) {
 	} else { // abort
 		for _, p := range c.participants {
 			if vote, exists := entry.Votes[p]; exists && vote {
-				// Only send abort to participants who voted YES
 				c.outbox <- Message{
 					Type:     DecisionMsg,
 					TxID:     txID,
@@ -139,7 +138,6 @@ func (c *Coordinator) makeDecision(txID, decision string) {
 				}
 				Log(c.ID, fmt.Sprintf("Sent abort to %s (was prepared)", p))
 			} else {
-				// Implicit ACK for those who voted NO
 				entry.Acks[p] = true
 				Log(c.ID, fmt.Sprintf("Implicit ACK from %s (voted NO)", p))
 			}
