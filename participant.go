@@ -72,7 +72,6 @@ func (p *Participant) HandleMessage(msg Message) {
 func (p *Participant) handlePrepare(msg Message) {
 	txID := msg.TxID
 	
-	// Check if we already processed this transaction
 	if entry := p.protocolTable.Get(txID); entry != nil && entry.State != "" {
 		Log(p.ID, fmt.Sprintf("Ignoring duplicate PREPARE for %s (already in state %s)", txID, entry.State))
 		return
@@ -128,7 +127,7 @@ func (p *Participant) handleDecision(msg Message) {
 
 	Log(p.ID, fmt.Sprintf("Enforced %s for %s", decision, txID))
 
-	// Always send ACK after enforcing decision
+
 	p.outbox <- Message{
 		Type:     AckMsg,
 		TxID:     txID,

@@ -8,7 +8,6 @@ import (
 func main() {
 	fmt.Println("=== Simulating Two-Phase Commit Protocol ===")
 
-	// Coordinator storage and table
 	coordStableLog := NewStableStorage("coord_" + StableDBFile)
 	coordProtocolTable := NewProtocolTable()
 
