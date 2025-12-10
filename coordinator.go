@@ -10,7 +10,7 @@ type Coordinator struct {
 	protocolTable *ProtocolTable
 	participants  []string
 	outbox        chan<- Message
-	done          chan<- bool 
+	done          chan<- bool
 }
 
 func NewCoordinator(id string, participants []string, stableLog *StableStorage, pt *ProtocolTable, outbox chan<- Message, done chan<- bool) *Coordinator {
@@ -32,11 +32,10 @@ func (c *Coordinator) StartTransaction(txID string) {
 		State:        "INIT",
 		Participants: c.participants,
 		Acks:         make(map[string]bool),
-		Votes:        make(map[string]bool), // track votes
+		Votes:        make(map[string]bool),
 	}
 	c.protocolTable.Put(txID, entry)
 
-	// Phase 1: Send PREPARE to all
 	for _, p := range c.participants {
 		c.outbox <- Message{
 			Type:     PrepareMsg,
@@ -51,6 +50,7 @@ func (c *Coordinator) StartTransaction(txID string) {
 func (c *Coordinator) HandleMessage(msg Message) {
 	entry := c.protocolTable.Get(msg.TxID)
 	if entry == nil {
+		Log(c.ID, fmt.Sprintf("Ignoring message for unknown transaction %s", msg.TxID))
 		return
 	}
 
@@ -59,19 +59,25 @@ func (c *Coordinator) HandleMessage(msg Message) {
 		c.handleVote(msg, entry)
 	case AckMsg:
 		c.handleAck(msg, entry)
+	default:
+		Log(c.ID, fmt.Sprintf("Ignoring unexpected message type %s", msg.Type))
 	}
 }
 
 func (c *Coordinator) handleVote(msg Message, entry *ProtocolEntry) {
 	if entry.State != "INIT" {
-		return // already decided
+		Log(c.ID, fmt.Sprintf("Ignoring vote for %s - already in state %s", msg.TxID, entry.State))
+		return
 	}
 
 	sender := msg.Sender
-	vote := msg.Payload.(bool)
+	vote, ok := msg.Payload.(bool)
+	if !ok {
+		Log(c.ID, fmt.Sprintf("Invalid vote payload from %s", sender))
+		return
+	}
 
 	Log(c.ID, fmt.Sprintf("Received vote %v from %s", vote, sender))
-
 
 	entry.Votes[sender] = vote
 	if !vote {
@@ -80,61 +86,22 @@ func (c *Coordinator) handleVote(msg Message, entry *ProtocolEntry) {
 		return
 	}
 
-
 	if len(entry.Votes) == len(c.participants) {
-		c.makeDecision(entry.TxID, "commit")
+		allYes := true
+		for _, v := range entry.Votes {
+			if !v {
+				allYes = false
+				break
+			}
+		}
+		if allYes {
+			c.makeDecision(entry.TxID, "commit")
+		} else {
+			c.makeDecision(entry.TxID, "abort")
+		}
 	}
 }
 
-// func (c *Coordinator) makeDecision(txID, decision string) {
-// 	entry := c.protocolTable.Get(txID)
-// 	if entry == nil || entry.State != "INIT" {
-// 		return
-// 	}
-
-// 	entry.State = "DECIDED"
-// 	entry.Decision = decision
-// 	c.protocolTable.Put(txID, entry)
-
-// 	c.stableLog.Write(LogRecord{TxID: txID, Type: LogRecordType(decision)})
-// 	Log(c.ID, fmt.Sprintf("Made decision: %s for %s", decision, txID))
-
-// 	for _, p := range c.participants {
-// 		if decision == "commit" {
-// 			// Send to all
-// 			c.outbox <- Message{
-// 				Type:     DecisionMsg,
-// 				TxID:     txID,
-// 				Sender:   c.ID,
-// 				Receiver: p,
-// 				Payload:  decision,
-// 			}
-// 			Log(c.ID, fmt.Sprintf("Sent %s to %s", decision, p))
-// 		} else if decision == "abort" {
-// 			// Only send to those who voted YES (prepared)
-// 			if vote, ok := entry.Votes[p]; ok && vote {
-// 				c.outbox <- Message{
-// 					Type:     DecisionMsg,
-// 					TxID:     txID,
-// 					Sender:   c.ID,
-// 					Receiver: p,
-// 					Payload:  decision,
-// 				}
-// 				Log(c.ID, fmt.Sprintf("Sent %s to %s (was prepared)", decision, p))
-// 			} else {
-// 				// Implicit abort: they already aborted locally
-// 				entry.Acks[p] = true // mark as "handled"
-// 			}
-// 		}
-// 	}
-
-// 	// Check if all ACKs are already implicit
-// 	if len(entry.Acks) == len(c.participants) {
-// 		c.finalize(txID)
-// 	}
-// }
-// 
-// 
 func (c *Coordinator) makeDecision(txID, decision string) {
 	entry := c.protocolTable.Get(txID)
 	if entry == nil || entry.State != "INIT" {
@@ -150,17 +117,29 @@ func (c *Coordinator) makeDecision(txID, decision string) {
 
 	if decision == "commit" {
 		for _, p := range c.participants {
-			c.outbox <- Message{Type: DecisionMsg, TxID: txID, Sender: c.ID, Receiver: p, Payload: "commit"}
+			c.outbox <- Message{
+				Type:     DecisionMsg,
+				TxID:     txID,
+				Sender:   c.ID,
+				Receiver: p,
+				Payload:  "commit",
+			}
+			Log(c.ID, fmt.Sprintf("Sent commit to %s", p))
 		}
-	} else {
-		for _, p := range c.participants{
-			if vote, ok := entry.Votes[p]; ok && vote {
-				c.outbox <- Message{Type: DecisionMsg, TxID: txID, Sender : c.ID, Receiver: p, Payload: "abort"}
-				Log(c.ID, fmt.Sprintf("Send abort to %s (was prepared)", p))
+	} else { // abort
+		for _, p := range c.participants {
+			if vote, exists := entry.Votes[p]; exists && vote {
+				// Only send abort to participants who voted YES
+				c.outbox <- Message{
+					Type:     DecisionMsg,
+					TxID:     txID,
+					Sender:   c.ID,
+					Receiver: p,
+					Payload:  "abort",
+				}
+				Log(c.ID, fmt.Sprintf("Sent abort to %s (was prepared)", p))
 			} else {
-				//participants voted no or hasn't responsed yet
-				//though in the abort immediately case, they voted No
-				// 
+				// Implicit ACK for those who voted NO
 				entry.Acks[p] = true
 				Log(c.ID, fmt.Sprintf("Implicit ACK from %s (voted NO)", p))
 			}
@@ -172,36 +151,21 @@ func (c *Coordinator) makeDecision(txID, decision string) {
 	}
 }
 
-// func (c *Coordinator) handleAck(msg Message, entry *ProtocolEntry) {
-// 	if entry.State != "DECIDED" {
-// 		return
-// 	}
-
-// 	sender := msg.Sender
-// 	entry.Acks[sender] = true
-
-// 	if len(entry.Acks) == len(c.participants) {
-// 		c.finalize(entry.TxID)
-// 	}
-// }
-// 
-
 func (c *Coordinator) handleAck(msg Message, entry *ProtocolEntry) {
 	if entry.State != "DECIDED" {
+		Log(c.ID, fmt.Sprintf("Ignoring ACK for %s - not in DECIDED state", msg.TxID))
 		return
 	}
-	entry.Acks[msg.Sender] = true
+
+	sender := msg.Sender
+	entry.Acks[sender] = true
+	Log(c.ID, fmt.Sprintf("Received ACK from %s", sender))
+
 	if len(entry.Acks) == len(c.participants) {
 		c.finalize(entry.TxID)
 	}
 }
 
-// func (c *Coordinator) finalize(txID string) {
-// 	c.stableLog.Write(LogRecord{TxID: txID, Type: EndRecord})
-// 	c.protocolTable.Delete(txID)
-// 	Log(c.ID, fmt.Sprintf("Finalized and forgot transaction %s", txID))
-// }
-// 
 func (c *Coordinator) finalize(txID string) {
 	c.stableLog.Write(LogRecord{TxID: txID, Type: EndRecord})
 	c.protocolTable.Delete(txID)
